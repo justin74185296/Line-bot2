@@ -2,10 +2,13 @@
 LINE 記帳機器人 - 配置檔案
 """
 import os
-from dotenv import load_dotenv
 
-# 載入環境變數
-load_dotenv()
+# 嘗試載入 .env 檔案（本地開發用）
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # LINE Bot 配置
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', '')
