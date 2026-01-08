@@ -1,0 +1,25 @@
+run = "python main.py"
+language = "python3"
+entrypoint = "main.py"
+
+[nix]
+channel = "stable-23_11"
+
+[env]
+PYTHONPATH = "${PYTHONPATH}:${REPL_HOME}"
+
+[packager]
+language = "python3"
+
+[packager.features]
+enabledForHosting = true
+packageSearch = true
+guessImports = true
+
+[deployment]
+run = ["sh", "-c", "python main.py"]
+deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
