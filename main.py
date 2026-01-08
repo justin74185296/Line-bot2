@@ -6,25 +6,7 @@ import os
 import logging
 from flask import Flask, request, abort
 
-from linebot.v3 import WebhookHandler
-from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    ReplyMessageRequest,
-    PushMessageRequest,
-    TextMessage
-)
-from linebot.v3.webhooks import (
-    MessageEvent,
-    TextMessageContent,
-    FollowEvent,
-    UnfollowEvent
-)
-from linebot.v3.exceptions import InvalidSignatureError
-
 import config
-import handlers
 
 # 設定日誌
 logging.basicConfig(
@@ -36,16 +18,129 @@ logger = logging.getLogger(__name__)
 # 建立 Flask 應用
 app = Flask(__name__)
 
-# LINE Bot 配置
-configuration = Configuration(
-    access_token=config.LINE_CHANNEL_ACCESS_TOKEN
-)
-handler = WebhookHandler(config.LINE_CHANNEL_SECRET)
+# LINE Bot 全域變數
+configuration = None
+handler = None
+line_bot_enabled = False
+
+
+def init_line_bot():
+    """初始化 LINE Bot"""
+    global configuration, handler, line_bot_enabled
+    
+    if not config.LINE_CHANNEL_ACCESS_TOKEN or not config.LINE_CHANNEL_SECRET:
+        logger.warning("LINE credentials not configured. Bot features disabled.")
+        return False
+    
+    try:
+        from linebot.v3 import WebhookHandler
+        from linebot.v3.messaging import Configuration
+        
+        configuration = Configuration(
+            access_token=config.LINE_CHANNEL_ACCESS_TOKEN
+        )
+        handler = WebhookHandler(config.LINE_CHANNEL_SECRET)
+        
+        # 註冊事件處理器
+        register_line_handlers()
+        
+        logger.info("LINE Bot initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize LINE Bot: {e}")
+        return False
+
+
+def register_line_handlers():
+    """註冊 LINE 事件處理器"""
+    from linebot.v3.messaging import (
+        ApiClient,
+        MessagingApi,
+        ReplyMessageRequest,
+        TextMessage
+    )
+    from linebot.v3.webhooks import (
+        MessageEvent,
+        TextMessageContent,
+        FollowEvent,
+        UnfollowEvent
+    )
+    import handlers as msg_handlers
+
+    @handler.add(MessageEvent, message=TextMessageContent)
+    def handle_text_message(event):
+        """處理文字訊息事件"""
+        user_id = event.source.user_id
+        text = event.message.text
+        
+        logger.info(f"Received message from {user_id}: {text}")
+        
+        try:
+            reply_text = msg_handlers.handle_message(user_id, text)
+            
+            with ApiClient(configuration) as api_client:
+                messaging_api = MessagingApi(api_client)
+                messaging_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_text)]
+                    )
+                )
+            
+            logger.info(f"Replied to {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            try:
+                with ApiClient(configuration) as api_client:
+                    messaging_api = MessagingApi(api_client)
+                    messaging_api.reply_message(
+                        ReplyMessageRequest(
+                            reply_token=event.reply_token,
+                            messages=[TextMessage(text="😅 抱歉，處理訊息時發生錯誤，請稍後再試")]
+                        )
+                    )
+            except Exception as reply_error:
+                logger.error(f"Error sending error reply: {reply_error}")
+
+    @handler.add(FollowEvent)
+    def handle_follow(event):
+        """處理用戶加入好友事件"""
+        user_id = event.source.user_id
+        logger.info(f"New follower: {user_id}")
+        
+        try:
+            welcome_message = msg_handlers.handle_follow_event(user_id)
+            
+            with ApiClient(configuration) as api_client:
+                messaging_api = MessagingApi(api_client)
+                messaging_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=welcome_message)]
+                    )
+                )
+            
+            logger.info(f"Sent welcome message to {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error handling follow event: {e}")
+
+    @handler.add(UnfollowEvent)
+    def handle_unfollow(event):
+        """處理用戶取消好友事件"""
+        user_id = event.source.user_id
+        logger.info(f"User unfollowed: {user_id}")
+        
+        try:
+            msg_handlers.handle_unfollow_event(user_id)
+        except Exception as e:
+            logger.error(f"Error handling unfollow event: {e}")
 
 
 @app.route('/')
 def index():
-    """首頁 - 用於健康檢查"""
+    """首頁"""
     return '''
     <html>
         <head>
@@ -93,23 +188,22 @@ def index():
 @app.route('/health')
 def health():
     """健康檢查端點"""
-    return {'status': 'healthy', 'service': 'line-accounting-bot'}
+    return {'status': 'healthy', 'service': 'line-accounting-bot', 'line_bot': line_bot_enabled}
 
 
 @app.route('/callback', methods=['POST'])
 def callback():
-    """
-    LINE Webhook 回調端點
-    接收並處理來自 LINE Platform 的事件
-    """
-    # 取得 X-Line-Signature 標頭
-    signature = request.headers.get('X-Line-Signature', '')
+    """LINE Webhook 回調端點"""
+    if not line_bot_enabled or handler is None:
+        logger.error("LINE Bot not configured")
+        return {'error': 'LINE Bot not configured'}, 503
     
-    # 取得請求內容
+    from linebot.v3.exceptions import InvalidSignatureError
+    
+    signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
     logger.info(f"Request body: {body}")
     
-    # 驗證簽名並處理 Webhook
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -122,167 +216,21 @@ def callback():
     return 'OK'
 
 
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_text_message(event: MessageEvent):
-    """
-    處理文字訊息事件
-    
-    Args:
-        event: LINE 訊息事件
-    """
-    user_id = event.source.user_id
-    text = event.message.text
-    
-    logger.info(f"Received message from {user_id}: {text}")
-    
-    try:
-        # 處理訊息並取得回覆
-        reply_text = handlers.handle_message(user_id, text)
-        
-        # 發送回覆
-        with ApiClient(configuration) as api_client:
-            messaging_api = MessagingApi(api_client)
-            messaging_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply_text)]
-                )
-            )
-        
-        logger.info(f"Replied to {user_id}")
-        
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        
-        # 發送錯誤訊息
-        try:
-            with ApiClient(configuration) as api_client:
-                messaging_api = MessagingApi(api_client)
-                messaging_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text="😅 抱歉，處理訊息時發生錯誤，請稍後再試")]
-                    )
-                )
-        except Exception as reply_error:
-            logger.error(f"Error sending error reply: {reply_error}")
-
-
-@handler.add(FollowEvent)
-def handle_follow(event: FollowEvent):
-    """
-    處理用戶加入好友事件
-    
-    Args:
-        event: LINE 追蹤事件
-    """
-    user_id = event.source.user_id
-    
-    logger.info(f"New follower: {user_id}")
-    
-    try:
-        # 取得歡迎訊息
-        welcome_message = handlers.handle_follow_event(user_id)
-        
-        # 發送歡迎訊息
-        with ApiClient(configuration) as api_client:
-            messaging_api = MessagingApi(api_client)
-            messaging_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=welcome_message)]
-                )
-            )
-        
-        logger.info(f"Sent welcome message to {user_id}")
-        
-    except Exception as e:
-        logger.error(f"Error handling follow event: {e}")
-
-
-@handler.add(UnfollowEvent)
-def handle_unfollow(event: UnfollowEvent):
-    """
-    處理用戶取消好友/封鎖事件
-    
-    Args:
-        event: LINE 取消追蹤事件
-    """
-    user_id = event.source.user_id
-    
-    logger.info(f"User unfollowed: {user_id}")
-    
-    try:
-        handlers.handle_unfollow_event(user_id)
-    except Exception as e:
-        logger.error(f"Error handling unfollow event: {e}")
-
-
-def push_message(user_id: str, message: str) -> bool:
-    """
-    主動推送訊息給用戶（用於提醒功能）
-    
-    Args:
-        user_id: 用戶 ID
-        message: 訊息內容
-    
-    Returns:
-        是否成功發送
-    """
-    try:
-        with ApiClient(configuration) as api_client:
-            messaging_api = MessagingApi(api_client)
-            messaging_api.push_message(
-                PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text=message)]
-                )
-            )
-        logger.info(f"Pushed message to {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Error pushing message to {user_id}: {e}")
-        return False
-
-
-def check_and_send_reminders():
-    """
-    檢查並發送今日到期的提醒
-    
-    這個函數可以被定時任務調用
-    """
-    import database
-    import utils
-    from datetime import datetime
-    
-    logger.info("Checking reminders...")
-    
-    # 這裡需要遍歷所有用戶
-    # 在實際部署時，建議使用背景任務（如 APScheduler）
-    # 並維護一個活躍用戶列表
-    
-    # 示範代碼（需要根據實際情況調整）
-    # for user_id in get_active_users():
-    #     reminders = database.get_today_reminders(user_id)
-    #     for reminder in reminders:
-    #         msg = f"⏰ 帳單提醒\n\n📌 {reminder['name']}\n💰 金額：${utils.format_amount(reminder['amount'])}\n\n今天記得繳費喔！"
-    #         push_message(user_id, msg)
-    #         database.update_reminder_notified(user_id, reminder['id'])
+# 初始化 LINE Bot
+line_bot_enabled = init_line_bot()
 
 
 if __name__ == '__main__':
-    # 檢查必要的環境變數
     if not config.LINE_CHANNEL_ACCESS_TOKEN:
         logger.warning("LINE_CHANNEL_ACCESS_TOKEN is not set!")
     if not config.LINE_CHANNEL_SECRET:
         logger.warning("LINE_CHANNEL_SECRET is not set!")
     
-    logger.info(f"Starting LINE Accounting Bot on {config.FLASK_HOST}:{config.FLASK_PORT}")
-    logger.info(f"Debug mode: {config.FLASK_DEBUG}")
+    port = int(os.environ.get('PORT', config.FLASK_PORT))
+    logger.info(f"Starting LINE Accounting Bot on {config.FLASK_HOST}:{port}")
     
-    # 啟動 Flask 應用
     app.run(
         host=config.FLASK_HOST,
-        port=config.FLASK_PORT,
+        port=port,
         debug=config.FLASK_DEBUG
     )
