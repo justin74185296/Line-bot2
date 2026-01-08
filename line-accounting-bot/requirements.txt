@@ -1,0 +1,18 @@
+# LINE 記帳機器人依賴套件
+# Flask Web Framework
+Flask>=3.0.0
+
+# LINE Bot SDK (最新 v3 版本)
+line-bot-sdk>=3.5.0
+
+# 環境變數管理
+python-dotenv>=1.0.0
+
+# HTTP 請求（line-bot-sdk 依賴）
+requests>=2.31.0
+
+# 生產環境 WSGI 伺服器（可選，部署時使用）
+gunicorn>=21.2.0
+
+# 背景任務排程（可選，用於定時提醒）
+APScheduler>=3.10.0

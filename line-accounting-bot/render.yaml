@@ -1,0 +1,17 @@
+# Render 部署配置
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: line-accounting-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app
+    healthCheckPath: /health
+    envVars:
+      - key: FLASK_DEBUG
+        value: False
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
